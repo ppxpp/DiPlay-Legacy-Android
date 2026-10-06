@@ -38,3 +38,7 @@ release-signing.properties
 *.key
 *.apk
 *.aab
+
+# 有意公开的临时开发签名
+!/dev-signing/diplay-development.jks
+!/dev-signing/release-signing.properties
