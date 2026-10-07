@@ -26,7 +26,7 @@ class NcmUsbBridge internal constructor(
     private val statusEndpoint: UsbEndpoint?,
     private val claimedInterfaces: List<UsbInterface>,
     descriptorHostMac: ByteArray?,
-) : Closeable {
+) : EthernetFramePipe {
     private val descriptorMac = descriptorHostMac?.copyOf()
     val hostMac: ByteArray? get() = descriptorMac?.copyOf()
     private val stateLock = Any()
@@ -57,7 +57,7 @@ class NcmUsbBridge internal constructor(
     }
 
     /** Wraps one Ethernet frame in one NTB16 block and writes it to bulk OUT. */
-    fun send(frame: ByteArray, timeoutMillis: Int) = synchronized(writeLock) {
+    override fun send(frame: ByteArray, timeoutMillis: Int) = synchronized(writeLock) {
         checkOpen()
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
         val sequence = synchronized(stateLock) {
@@ -90,7 +90,7 @@ class NcmUsbBridge internal constructor(
      * Returns the next complete Ethernet frame, or null when [timeoutMillis] elapses without one.
      * USB reads may split or coalesce NTB blocks; this method reassembles whole blocks internally.
      */
-    fun recv(timeoutMillis: Long): ByteArray? {
+    override fun recv(timeoutMillis: Long): ByteArray? {
         require(timeoutMillis > 0) { "timeoutMillis must be positive" }
         synchronized(readLock) {
             checkOpen()

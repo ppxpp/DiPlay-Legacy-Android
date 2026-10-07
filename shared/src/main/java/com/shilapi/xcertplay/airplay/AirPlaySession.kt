@@ -1,5 +1,8 @@
 package com.shilapi.xcertplay.airplay
 
+import com.shilapi.xcertplay.network.AirPlayNetwork
+import com.shilapi.xcertplay.network.SystemAirPlayNetwork
+
 import android.util.Log
 import com.shilapi.xcertplay.mfi.MfiAuthenticator
 import com.shilapi.xcertplay.transport.BlockingDuplexByteStream
@@ -28,6 +31,8 @@ interface AirPlaySessionListener {
     fun onSessionActive(session: AirPlaySession) {}
     fun onSessionEnded(session: AirPlaySession) {}
     fun onVideoFrameRendered(session: AirPlaySession) {}
+    fun onAudioPacketReceived(session: AirPlaySession) {}
+    fun onMicrophonePacketSent(session: AirPlaySession) {}
     fun onTransportError(message: String) {}
     fun onDeviceInfo(session: AirPlaySession, info: AirPlayDeviceInfo) {}
     fun onHostUiRequested(session: AirPlaySession) {}
@@ -61,6 +66,7 @@ class AirPlaySession(
     private val mfi: MfiAuthenticator?,
     private val listener: AirPlaySessionListener,
     private val media: AirPlayMediaHandler,
+    val network: AirPlayNetwork = SystemAirPlayNetwork,
 ) : Closeable {
     internal val pairSetup = PairSetup(identity, pairings)
     internal val pairVerify = PairVerify(identity, pairings)
@@ -83,7 +89,7 @@ class AirPlaySession(
     private var pendingNightMode: Boolean? = null
     private val firstTouchSendLogged = AtomicBoolean(false)
     private val touchSendFailureLogged = AtomicBoolean(false)
-    private val ntp = NtpClock()
+    private val ntp = NtpClock(network)
     private var keepAliveSocket: DatagramSocket? = null
     private var keepAliveThread: Thread? = null
     private val eventWriteLock = Any()
@@ -105,6 +111,8 @@ class AirPlaySession(
         if (!closed.get()) listener.onVideoFrameRendered(this)
     }
 
+    internal fun audioPacketReceived() = listener.onAudioPacketReceived(this)
+    internal fun microphonePacketSent() = listener.onMicrophonePacketSent(this)
     internal fun logTrace(message: String) = trace(message)
 
     fun start() {
@@ -579,7 +587,7 @@ class AirPlaySession(
     }
 
     private fun openKeepAlive(): Int {
-        val socket = DatagramSocket(null)
+        val socket = network.datagram()
         socket.reuseAddress = true
         socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
         keepAliveSocket = socket
@@ -602,7 +610,7 @@ class AirPlaySession(
     }
 
     private fun openEvent(): Int {
-        val server = ServerSocket(0, 50, InetAddress.getByName("::"))
+        val server = network.server().apply { bind(InetSocketAddress(InetAddress.getByName("::"), 0), 50) }
         eventServer = server
         spawnEvent("airplay-event-accept") { acceptEvent(server) }
         return server.localPort

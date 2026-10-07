@@ -24,6 +24,7 @@ class Ipv6NcmBridge(
     private val tun: ParcelFileDescriptor,
     private val hostMac: ByteArray,
     private val onError: (Throwable) -> Unit,
+    private val onFrame: () -> Unit = {},
 ) : Closeable {
     init {
         require(hostMac.size == EthernetIpv6Codec.MAC_BYTES) { "hostMac must be 6 bytes" }
@@ -66,6 +67,7 @@ class Ipv6NcmBridge(
             while (running.get()) {
                 val frame = ncm.recv(READ_TIMEOUT_MILLIS) ?: continue
                 val ipv6 = EthernetIpv6Codec.parseIpv6View(frame) ?: continue
+                onFrame()
                 peerMac = ipv6.sourceMac
                 if (!loggedInbound) {
                     loggedInbound = true

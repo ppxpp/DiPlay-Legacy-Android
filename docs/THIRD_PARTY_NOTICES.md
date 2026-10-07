@@ -41,3 +41,13 @@ The static site layout, CSS and generator adapt DiAuto (AGPL-3.0). The AGPL lice
 Required Notice: Copyright AndyShaman (https://github.com/AndyShaman/BYDMate)
 
 The maneuver PNGs under `shared/src/main/assets/byd-hud-icons` were imported from BYDMate. Its PolyForm Noncommercial 1.0.0 terms and required notice are included alongside the assets. These files are separate from the project code license; upstream describes them as donor assets and their original provenance is not independently established. The validated DiLink5.1 windshield path uses factory turn codes rather than these images.
+
+## lwIP (wired compatibility network backend)
+
+The application vendors lwIP 2.2.1 (commit
+`77dcd25a72509eb83f72b033d219b1d40cd8eb95`) from
+https://github.com/lwip-tcpip/lwip. lwIP is distributed under its BSD-style
+license. Original source notices are retained in
+`shared/src/main/jni/vendor/lwip`, and the license is included in APK assets as
+`licenses/lwip-COPYING.txt`. Android/JNI adaptation is maintained separately in
+`shared/src/main/jni/userspace`.

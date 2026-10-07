@@ -40,6 +40,8 @@ import com.shilapi.xcertplay.hud.BydAdbAccess
 import com.shilapi.xcertplay.hud.BydOutputSettings
 import com.shilapi.xcertplay.host.R
 import com.shilapi.xcertplay.orchestration.WirelessHotspotMode
+import com.shilapi.xcertplay.orchestration.WiredNetworkMode
+import com.shilapi.xcertplay.diagnostics.*
 import com.shilapi.xcertplay.transport.EvChargingConnectors
 import java.io.File
 import java.text.SimpleDateFormat
@@ -51,6 +53,10 @@ import kotlin.math.roundToInt
 class DiPlayActivity : ComponentActivity() {
     private val handler = Handler(Looper.getMainLooper())
     private var page = "home"
+    private var showDiagnosticsOnConnect = false
+    private val diagnosticRows = linkedMapOf<DiagnosticStage, TextView>()
+    private var diagnosticSummary: TextView? = null
+    private var diagnosticBanner: TextView? = null
     private var pendingCarHotspotSetup = false
     private var setupError: String? = null
     private var status: TextView? = null
@@ -71,7 +77,7 @@ class DiPlayActivity : ComponentActivity() {
         connect(notificationTransport)
     }
     private val tick = object : Runnable {
-        override fun run() { refreshStatus(); handler.postDelayed(this, 1000) }
+        override fun run() { refreshStatus(); refreshDiagnostics(); handler.postDelayed(this, 1000) }
     }
     private val bluetoothPermission = registerForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) choosePhone() else permissionHelp(getString(R.string.nearby_devices), getString(R.string.allow_nearby_devices_so_diplay_can_connect_to_your_paired))
@@ -142,6 +148,7 @@ class DiPlayActivity : ComponentActivity() {
     override fun onPause() { handler.removeCallbacks(tick); super.onPause() }
 
     private fun render() {
+        diagnosticRows.clear(); diagnosticSummary = null; diagnosticBanner = null
         status = null; connectButton = null; disconnectButton = null; lastRunning = null
         val scroll = ScrollView(this).apply { setBackgroundColor(BG); isFillViewport = true; clipToPadding = false }
         val content = column().apply { setPadding(dp(32), dp(24), dp(32), dp(32)) }
@@ -159,6 +166,7 @@ class DiPlayActivity : ComponentActivity() {
             "connection" -> connectionSetup(content)
             "settings" -> settings(content)
             "about" -> about(content)
+            "diagnostics" -> wiredDiagnostics(content)
             else -> home(content)
         }
         setContentView(scroll)
@@ -212,6 +220,8 @@ class DiPlayActivity : ComponentActivity() {
             addView(logo, LinearLayout.LayoutParams(dp(96), dp(96)))
         }
         right.addView(button(getString(R.string.connect_with_usb), false) { connect(false) }, matchButton())
+        right.addView(label(modeLabel(AirPlayPersistence.loadWiredNetworkMode(this)), 14, MUTED))
+        right.addView(button(getString(R.string.wired_diagnostics_open), false) { page = "diagnostics"; render() }, matchButton(10, 56))
         right.addView(label(getString(R.string.plug_your_iphone_into_a_usb_data_port_allow_carplay_when_y), 14, MUTED).apply { gravity = Gravity.CENTER; setPadding(dp(8), dp(10), dp(8), dp(24)) })
         right.addView(button(getString(R.string.settings), false) { page = "settings"; render() }, matchButton())
         right.addView(label(getString(R.string.make_diplay_feel_right_for_your_car), 14, MUTED).apply { gravity = Gravity.CENTER; setPadding(0, dp(10), 0, dp(24)) })
@@ -251,6 +261,7 @@ class DiPlayActivity : ComponentActivity() {
             card.addView(button(getString(R.string.open_connection_setup), false) { page = "connection"; render() }, matchButton(12, 60))
         }
         section(content, getString(R.string.diagnostics), R.drawable.ic_dp_diagnostics) { card ->
+            card.addView(button(getString(R.string.wired_diagnostics_open), false) { page = "diagnostics"; render() }, matchButton(10, 60))
             exportButton = button(if (exportInProgress) getString(R.string.saving_report) else getString(R.string.save_diagnostic_report), false) {
                 if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) exportDiagnostics()
                 else chooseReportDestination()
@@ -508,9 +519,171 @@ class DiPlayActivity : ComponentActivity() {
             card.addView(button(getString(R.string.connect_phone), true) { connect(true) }, matchButton(12, 60))
         }
         section(content, getString(R.string.prefer_a_cable)) { card ->
+            wiredModeControls(card)
             card.addView(label(getString(R.string.use_a_usb_data_cable_and_the_car_s_usb_data_port_unlock_yo), 16, MUTED))
             card.addView(button(getString(R.string.connect_with_usb), false) { connect(false) }, matchButton(12, 60))
         }
+    }
+
+
+    private fun modeLabel(mode: WiredNetworkMode) = getString(
+        if (mode == WiredNetworkMode.VPN) R.string.wired_mode_vpn else R.string.wired_mode_userspace)
+
+    private fun wiredModeControls(card: LinearLayout) {
+        card.addView(label(getString(R.string.wired_mode_hint), 16, MUTED))
+        val modes = WiredNetworkMode.entries
+        val control = button("${getString(R.string.wired_mode_title)} · ${modeLabel(AirPlayPersistence.loadWiredNetworkMode(this))}", false) {}
+        control.setOnClickListener {
+            var selected = modes.indexOf(AirPlayPersistence.loadWiredNetworkMode(this))
+            AlertDialog.Builder(this).setTitle(getString(R.string.wired_mode_title))
+                .setSingleChoiceItems(modes.map(::modeLabel).toTypedArray(), selected) { _, index -> selected = index }
+                .setPositiveButton(getString(R.string.save)) { _, _ ->
+                    val mode = modes[selected]
+                    if (mode != AirPlayPersistence.loadWiredNetworkMode(this)) {
+                        val save = {
+                            AirPlayPersistence.saveWiredNetworkMode(this, mode)
+                            control.text = "${getString(R.string.wired_mode_title)} · ${modeLabel(mode)}"
+                            toast(getString(R.string.wired_mode_saved))
+                            refreshDiagnostics()
+                        }
+                        if (CarPlayBackgroundSession.hasSession()) {
+                            AlertDialog.Builder(this).setTitle(getString(R.string.wired_mode_disconnect_title))
+                                .setMessage(getString(R.string.wired_mode_disconnect_body))
+                                .setPositiveButton(getString(R.string.disconnect)) { _, _ ->
+                                    CarPlayBackgroundSession.stop { runOnUiThread { save() } }
+                                }.setNegativeButton(getString(R.string.cancel), null).show()
+                        } else save()
+                    }
+                }.setNegativeButton(getString(R.string.cancel), null).show()
+        }
+        card.addView(control, matchButton(12, 60))
+    }
+
+    private fun wiredDiagnostics(content: LinearLayout) {
+        content.addView(label(getString(R.string.wired_diagnostics_title), 34, TEXT, true))
+        diagnosticBanner = label(getString(R.string.wired_diagnostics_simulated), 17, WARNING, true)
+        content.addView(diagnosticBanner)
+        diagnosticSummary = label("", 16, MUTED).apply { setPadding(0, dp(12), 0, dp(16)) }
+        content.addView(diagnosticSummary)
+        val controls = card()
+        wiredModeControls(controls)
+        controls.addView(button(getString(R.string.wired_diagnostics_start), true) {
+            showDiagnosticsOnConnect = true
+            connect(false)
+        }, matchButton(12, 60))
+        controls.addView(button(getString(R.string.wired_diagnostics_stop), false) {
+            ConnectionDiagnostics.current?.stop()
+            CarPlayBackgroundSession.stop { runOnUiThread { refreshDiagnostics() } }
+        }, matchButton(10, 60))
+        controls.addView(button(getString(R.string.open_carplay), false) { openProjection() }, matchButton(10, 60))
+        controls.addView(button(getString(R.string.save_diagnostic_report), false) {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) exportDiagnostics() else chooseReportDestination()
+        }, matchButton(10, 60))
+        content.addView(controls)
+        content.addView(label(getString(R.string.wired_diagnostics_observation), 15, MUTED).apply { setPadding(0, dp(16), 0, dp(12)) })
+        DiagnosticStage.entries.forEach { stage ->
+            val row = label("", 16, TEXT).apply { setPadding(dp(16), dp(14), dp(16), dp(14)); background = rounded(SURFACE, BORDER) }
+            diagnosticRows[stage] = row
+            content.addView(row)
+            content.addView(space(8))
+        }
+        refreshDiagnostics()
+    }
+
+    private fun refreshDiagnostics() {
+        if (page != "diagnostics") return
+        val snapshot = ConnectionDiagnostics.current?.snapshot()
+        diagnosticBanner?.visibility = if (snapshot?.simulated == true) View.VISIBLE else View.GONE
+        diagnosticSummary?.text = getString(R.string.wired_diagnostics_next, modeLabel(AirPlayPersistence.loadWiredNetworkMode(this))) + "\n" +
+            if (snapshot == null) getString(R.string.wired_diagnostics_empty)
+            else getString(R.string.wired_diagnostics_attempt, modeLabel(snapshot.mode), java.text.DateFormat.getDateTimeInstance().format(Date(snapshot.createdAt))) +
+                (snapshot.failure?.let { "\n✗ ${getString(stageResource(it.stage))}: ${it.detail}" }
+                    ?: snapshot.steps.firstOrNull { it.state == DiagnosticState.RUNNING }?.let { "\n… ${getString(stageResource(it.stage))}" }
+                    ?: snapshot.steps.lastOrNull { it.state == DiagnosticState.PASSED }?.let { "\n✓ ${getString(stageResource(it.stage))}: ${it.detail}" } ?: "")
+        diagnosticRows.forEach { (stage, view) ->
+            val step = snapshot?.steps?.firstOrNull { it.stage == stage } ?: DiagnosticStep(stage)
+            val blocked = step.state == DiagnosticState.NOT_STARTED && snapshot?.failure != null
+            val stopped = step.state == DiagnosticState.NOT_STARTED && snapshot?.stopped == true
+            val stateLabel = when {
+                blocked -> getString(R.string.wired_diagnostics_blocked)
+                stopped -> getString(R.string.wired_diagnostics_stopped)
+                else -> getString(stateResource(step.state))
+            }
+            val symbol = when (step.state) {
+                DiagnosticState.PASSED -> "✓"
+                DiagnosticState.FAILED -> "✗"
+                DiagnosticState.RUNNING -> "…"
+                else -> "—"
+            }
+            val elapsed = step.startedAt?.let { start -> ((step.finishedAt ?: System.currentTimeMillis()) - start).coerceAtLeast(0) / 1000 }
+            view.text = "$symbol ${getString(stageResource(stage))} · $stateLabel" +
+                (elapsed?.let { " · ${it}s" } ?: "") +
+                (if (step.detail.isBlank()) "" else "\n" + getString(R.string.wired_diagnostics_detail, step.detail)) +
+                (if (step.state == DiagnosticState.FAILED) "\n" + getString(R.string.wired_diagnostics_hint, getString(hintResource(stage))) else "")
+            view.setTextColor(when (step.state) {
+                DiagnosticState.PASSED -> Color.rgb(100, 220, 160)
+                DiagnosticState.FAILED -> WARNING
+                DiagnosticState.RUNNING -> ACCENT
+                else -> MUTED
+            })
+        }
+    }
+
+    private fun stageResource(stage: DiagnosticStage): Int = when (stage) {
+        DiagnosticStage.CAPABILITIES -> R.string.wired_stage_capabilities
+        DiagnosticStage.VPN -> R.string.wired_stage_vpn
+        DiagnosticStage.BLUETOOTH -> R.string.wired_stage_bluetooth
+        DiagnosticStage.AUTH_PROVIDER -> R.string.wired_stage_auth_provider
+        DiagnosticStage.USB_DEVICE -> R.string.wired_stage_usb_device
+        DiagnosticStage.USB_PERMISSION -> R.string.wired_stage_usb_permission
+        DiagnosticStage.USB_CONFIGURATION -> R.string.wired_stage_usb_configuration
+        DiagnosticStage.USBMUX -> R.string.wired_stage_usbmux
+        DiagnosticStage.PAIRING -> R.string.wired_stage_pairing
+        DiagnosticStage.CONTROL -> R.string.wired_stage_control
+        DiagnosticStage.NCM -> R.string.wired_stage_ncm
+        DiagnosticStage.NETWORK -> R.string.wired_stage_network
+        DiagnosticStage.NETWORK_INPUT -> R.string.wired_stage_network_input
+        DiagnosticStage.IAP2 -> R.string.wired_stage_iap2
+        DiagnosticStage.AUTHENTICATION -> R.string.wired_stage_authentication
+        DiagnosticStage.NEIGHBOR -> R.string.wired_stage_neighbor
+        DiagnosticStage.AIRPLAY -> R.string.wired_stage_airplay
+        DiagnosticStage.VIDEO -> R.string.wired_stage_video
+        DiagnosticStage.AUDIO -> R.string.wired_stage_audio
+        DiagnosticStage.TOUCH -> R.string.wired_stage_touch
+        DiagnosticStage.MICROPHONE -> R.string.wired_stage_microphone
+    }
+
+    private fun hintResource(stage: DiagnosticStage): Int = when (stage) {
+        DiagnosticStage.CAPABILITIES -> R.string.wired_hint_capabilities
+        DiagnosticStage.VPN -> R.string.wired_hint_vpn
+        DiagnosticStage.BLUETOOTH -> R.string.wired_hint_bluetooth
+        DiagnosticStage.AUTH_PROVIDER -> R.string.wired_hint_auth_provider
+        DiagnosticStage.USB_DEVICE -> R.string.wired_hint_usb_device
+        DiagnosticStage.USB_PERMISSION -> R.string.wired_hint_usb_permission
+        DiagnosticStage.USB_CONFIGURATION -> R.string.wired_hint_usb_configuration
+        DiagnosticStage.USBMUX -> R.string.wired_hint_usbmux
+        DiagnosticStage.PAIRING -> R.string.wired_hint_pairing
+        DiagnosticStage.CONTROL -> R.string.wired_hint_control
+        DiagnosticStage.NCM -> R.string.wired_hint_ncm
+        DiagnosticStage.NETWORK -> R.string.wired_hint_network
+        DiagnosticStage.NETWORK_INPUT -> R.string.wired_hint_network_input
+        DiagnosticStage.IAP2 -> R.string.wired_hint_iap2
+        DiagnosticStage.AUTHENTICATION -> R.string.wired_hint_authentication
+        DiagnosticStage.NEIGHBOR -> R.string.wired_hint_neighbor
+        DiagnosticStage.AIRPLAY -> R.string.wired_hint_airplay
+        DiagnosticStage.VIDEO -> R.string.wired_hint_video
+        DiagnosticStage.AUDIO -> R.string.wired_hint_audio
+        DiagnosticStage.TOUCH -> R.string.wired_hint_touch
+        DiagnosticStage.MICROPHONE -> R.string.wired_hint_microphone
+    }
+
+    private fun stateResource(state: DiagnosticState): Int = when (state) {
+        DiagnosticState.NOT_STARTED -> R.string.wired_state_not_started
+        DiagnosticState.RUNNING -> R.string.wired_state_running
+        DiagnosticState.PASSED -> R.string.wired_state_passed
+        DiagnosticState.FAILED -> R.string.wired_state_failed
+        DiagnosticState.UNVERIFIED -> R.string.wired_state_unverified
+        DiagnosticState.NOT_APPLICABLE -> R.string.wired_state_not_applicable
     }
 
     private fun wirelessLinkControls(parent: LinearLayout) {
@@ -750,7 +923,14 @@ class DiPlayActivity : ComponentActivity() {
 
     private fun connect(wireless: Boolean) {
         if (wireless && pendingCarHotspotSetup) { toast(getString(R.string.save_your_hotspot_details_in_connection_setup_first)); page = "connection"; render(); return }
-        if (setupError != null) { toast(setupError!!); return }
+        if (setupError != null) {
+            if (!wireless) {
+                val run = ConnectionDiagnostics.start(AirPlayPersistence.loadWiredNetworkMode(this))
+                run.fail(DiagnosticStage.AUTH_PROVIDER, "Authentication provider could not load; use the existing provisioned package")
+                refreshDiagnostics()
+            }
+            toast(setupError!!); return
+        }
         if (wireless && AirPlayPersistence.loadWirelessHotspotMode(this) == WirelessHotspotMode.MANUAL &&
             hotspotError(storedSsid(), storedPassword()) != null) {
             pendingCarHotspotSetup = true
@@ -778,7 +958,8 @@ class DiPlayActivity : ComponentActivity() {
         else open()
     }
     private fun openProjection() {
-        startActivity(Intent(this, CarPlayHostActivity::class.java).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+        startActivity(Intent(this, CarPlayHostActivity::class.java).putExtra("show_diagnostics", showDiagnosticsOnConnect).addFlags(Intent.FLAG_ACTIVITY_REORDER_TO_FRONT))
+        showDiagnosticsOnConnect = false
     }
     @android.annotation.SuppressLint("MissingPermission")
     private fun choosePhone() {
@@ -923,6 +1104,10 @@ class DiPlayActivity : ComponentActivity() {
                     appendLine()
                     appendLine("--- Last display negotiation (timestamps distinguish it from current settings) ---")
                     appendLine(DisplayDiagnosticSnapshot.report(appContext))
+                    appendLine("--- Wired connection stages ---")
+                    ConnectionDiagnostics.report().lineSequence().forEach { line ->
+                        DiagnosticRedactor.redact(line)?.let { appendLine(it) }
+                    }
                     appendLine()
                     for (name in SessionLogFile.REPORT_NAMES) {
                         val file = File(appContext.filesDir, "logs/$name")

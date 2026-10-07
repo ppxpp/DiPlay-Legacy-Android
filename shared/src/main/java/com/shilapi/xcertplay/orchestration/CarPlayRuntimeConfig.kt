@@ -10,6 +10,9 @@ enum class CarPlayTransport {
     WIRELESS,
 }
 
+/** Explicit user selection; never fall back silently after a connection failure. */
+enum class WiredNetworkMode { VPN, USERSPACE }
+
 enum class MfiTarget {
     LOCAL,
     USB_CH341,
@@ -55,6 +58,7 @@ class CarPlayRuntimeConfig(
     val label: String = "xcertplay",
     val hostName: String = "xcertplay",
     val transport: CarPlayTransport = CarPlayTransport.WIRED,
+    val wiredNetworkMode: WiredNetworkMode = WiredNetworkMode.VPN,
     val wirelessHotspotMode: WirelessHotspotMode = WirelessHotspotMode.WIFI_P2P,
     val manualHotspotSsid: String? = null,
     val manualHotspotPassphrase: String? = null,

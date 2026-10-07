@@ -1,5 +1,8 @@
 package com.shilapi.xcertplay.airplay
 
+import com.shilapi.xcertplay.network.AirPlayNetwork
+import com.shilapi.xcertplay.network.SystemAirPlayNetwork
+
 import java.io.Closeable
 import java.io.InputStream
 import java.net.Inet4Address
@@ -21,6 +24,7 @@ import java.util.concurrent.atomic.AtomicLong
 class IapTunnel(
     private val readKey: ByteArray,
     bindAddress: InetAddress = InetAddress.getByName("0.0.0.0"),
+    private val network: AirPlayNetwork = SystemAirPlayNetwork,
 ) : Closeable {
     interface Listener {
         fun onOpen(remoteAddress: String?) {}
@@ -49,7 +53,8 @@ class IapTunnel(
         } else {
             InetAddress.getByName("::")
         }
-        val secondary = ServerSocket()
+        if (network.supportsIpv4) {
+        val secondary = network.server()
         runCatching {
             secondary.apply {
                 reuseAddress = true
@@ -68,6 +73,7 @@ class IapTunnel(
                     "$secondaryAddress port=${bound.localPort}: ${error.message}",
             )
         }
+        }
         servers.forEach { server ->
             threads += Thread({ accept(server) }, "airplay-iap-tunnel").apply {
                 isDaemon = true
@@ -78,7 +84,7 @@ class IapTunnel(
     }
 
     private fun bindAny(): ServerSocket =
-        ServerSocket().apply {
+        network.server().apply {
             reuseAddress = true
             bind(InetSocketAddress(bindAddress, 0))
         }

@@ -36,6 +36,12 @@ import com.shilapi.xcertplay.mfi.LocalMfiAuthenticationClient
 import com.shilapi.xcertplay.network.CarPlayBonjour
 import com.shilapi.xcertplay.network.diagnosticSummary
 import com.shilapi.xcertplay.network.CarPlayVpnService
+import com.shilapi.xcertplay.network.CarPlayUserSpaceService
+import com.shilapi.xcertplay.network.CarPlayHost
+import com.shilapi.xcertplay.network.CarPlayHostBinder
+import com.shilapi.xcertplay.diagnostics.ConnectionDiagnostics
+import com.shilapi.xcertplay.diagnostics.DiagnosticStage
+import com.shilapi.xcertplay.diagnostics.DiagnosticFailure
 import com.shilapi.xcertplay.network.LocalOnlyHotspotManager
 import com.shilapi.xcertplay.network.ManualHotspotManager
 import com.shilapi.xcertplay.network.WifiP2pGroupManager
@@ -158,8 +164,9 @@ class CarPlayController(
 
     private val appContext = context.applicationContext
     private val usbManager = context.getSystemService(Context.USB_SERVICE) as UsbManager
-    private val bluetoothAdapter =
+    private val bluetoothAdapter by lazy {
         (appContext.getSystemService(Context.BLUETOOTH_SERVICE) as? BluetoothManager)?.adapter
+    }
     private val iphoneHost = IphoneUsbHost(
         appContext,
         usbManager,
@@ -206,7 +213,7 @@ class CarPlayController(
     @Volatile private var wirelessTunnelChannel: Iap2Session? = null
     @Volatile private var wirelessIdentification: Iap2IdentificationConfig? = null
     @Volatile private var wirelessAirPlayEndpoint: Iap2WirelessCarPlayEndpoint? = null
-    @Volatile private var vpnService: CarPlayVpnService? = null
+    @Volatile private var vpnService: CarPlayHost? = null
     @Volatile private var vpnBound = false
     private val wirelessHandoffRequested = AtomicBoolean(false)
     private val wirelessTunnelReady = AtomicBoolean(false)
@@ -217,12 +224,16 @@ class CarPlayController(
     private var permissionCloseable: Closeable? = null
     private var attachCloseable: Closeable? = null
     private var ch341PermissionCloseable: Closeable? = null
+    private val diagnostics = if (config.transport == CarPlayTransport.WIRED) {
+        ConnectionDiagnostics.current?.takeUnless { it.snapshot().simulated || it.snapshot().stopped }
+            ?: ConnectionDiagnostics.start(config.wiredNetworkMode)
+    } else null
     private var vpnLatch = CountDownLatch(1)
     private val teardownComplete = CountDownLatch(1)
 
     private val serviceConnection = object : ServiceConnection {
         override fun onServiceConnected(name: ComponentName, binder: IBinder) {
-            vpnService = (binder as CarPlayVpnService.LocalBinder).service
+            vpnService = (binder as CarPlayHostBinder).host
             vpnLatch.countDown()
         }
 
@@ -236,11 +247,26 @@ class CarPlayController(
         override fun onSessionActive(session: AirPlaySession) {
             if (activeSession !== session) BydNavigationOutputs.start(appContext)
             activeSession = session
+            diagnostics?.pass(DiagnosticStage.NEIGHBOR, "Bidirectional IP communication established")
+            diagnostics?.pass(DiagnosticStage.AIRPLAY, "AirPlay session active")
             debugLog(
                 "AirPlay session active controller=${session.controllerId ?: "unknown"} " +
                     "peer=${session.host}",
             )
             uiListener?.onSessionActive(session)
+        }
+
+        override fun onAudioPacketReceived(session: AirPlaySession) {
+            diagnostics?.pass(DiagnosticStage.AUDIO, "Audio packet decrypted and delivered; audible output requires observation")
+            uiListener?.onAudioPacketReceived(session)
+        }
+        override fun onMicrophonePacketSent(session: AirPlaySession) {
+            diagnostics?.pass(DiagnosticStage.MICROPHONE, "Microphone packet sent; phone reception requires observation")
+            uiListener?.onMicrophonePacketSent(session)
+        }
+        override fun onVideoFrameRendered(session: AirPlaySession) {
+            diagnostics?.pass(DiagnosticStage.VIDEO, "Decoded video frame rendered")
+            uiListener?.onVideoFrameRendered(session)
         }
 
         override fun onSessionEnded(session: AirPlaySession) {
@@ -254,6 +280,7 @@ class CarPlayController(
         }
 
         override fun onTransportError(message: String) {
+            diagnostics?.fail(DiagnosticStage.NETWORK_INPUT, "AirPlay network transport stopped; see redacted diagnostic log")
             debugLog("AirPlay transport error: $message")
             uiListener?.onTransportError(message)
         }
@@ -330,6 +357,7 @@ class CarPlayController(
             permissionCloseable = iphoneHost.registerPermissionReceiver(::onIphonePermission)
             attachCloseable = iphoneHost.registerAttachReceiver(::onIphoneAttached)
         }
+        diagnostics?.begin(DiagnosticStage.AUTH_PROVIDER)
         startMfi()
     }
 
@@ -356,7 +384,9 @@ class CarPlayController(
         if (closed) return false
         val session = activeSession ?: return false
         return try {
-            touchExecutor.execute { session.sendTouch(contacts) }
+            touchExecutor.execute {
+                if (session.sendTouch(contacts)) diagnostics?.pass(DiagnosticStage.TOUCH, "Touch report sent; response on iPhone requires observation")
+            }
             true
         } catch (_: Exception) {
             false
@@ -392,6 +422,7 @@ class CarPlayController(
             if (closed) return
             closed = true
         }
+        diagnostics?.stop()
         BydNavigationOutputs.endNow()
         BydNavigationOutputs.clearClusterStreamControl(::applyClusterUi)
         closeReceivers()
@@ -918,10 +949,10 @@ class CarPlayController(
                     media = media,
                 )
             ) {
-                CarPlayVpnService.AttachResult.Started -> Unit
-                CarPlayVpnService.AttachResult.AlreadyStarted ->
+                CarPlayHost.AttachResult.Started -> Unit
+                CarPlayHost.AttachResult.AlreadyStarted ->
                     throw IOException("Wireless AirPlay transport is already attached")
-                is CarPlayVpnService.AttachResult.Failed ->
+                is CarPlayHost.AttachResult.Failed ->
                     throw IOException(result.message)
             }
             debugLog(
@@ -1394,7 +1425,10 @@ class CarPlayController(
             when (result) {
                 is IphoneUsbHost.Iap2SessionResult.Connected -> {
                     try {
+                        diagnostics?.pass(DiagnosticStage.USBMUX, "USBMUX interface opened")
+                        diagnostics?.begin(DiagnosticStage.NCM)
                         val ncm = openNcm(device)
+                        diagnostics?.pass(DiagnosticStage.NCM, "NCM interfaces claimed")
                         runStack(result.session, ncm)
                     } catch (error: Throwable) {
                         result.session.close()
@@ -1486,6 +1520,8 @@ class CarPlayController(
                 pairRecord = pairNewRecord(pairingClient)
                 carKitClient.open(pairRecord, config.label)
             }
+            diagnostics?.pass(DiagnosticStage.CONTROL, "CarKit service stream opened")
+            diagnostics?.begin(DiagnosticStage.IAP2)
             debugLog("wired com.apple.carkit.service stream opened")
             // Lab transport diagnostics: packet headers only, never certificate or challenge data.
             fun wireSummary(bytes: ByteArray): String {
@@ -1549,7 +1585,27 @@ class CarPlayController(
                 locationProvider = locationProvider,
                 vehicleStatusProvider = vehicleStatusProvider,
                 onIncoming = ::onRouteFrame,
-                onProgress = { message -> debugLog("wired $message") },
+                onProgress = { message ->
+                    when {
+                        message == "iap2 identification accepted" -> {
+                            diagnostics?.pass(DiagnosticStage.IAP2, "iAP2 identification accepted")
+                            diagnostics?.begin(DiagnosticStage.AUTHENTICATION)
+                        }
+                        message == "iap2 authentication accepted" -> diagnostics?.pass(DiagnosticStage.AUTHENTICATION, "iPhone accepted accessory authentication")
+                        message == "iap2 tx=0x4301 carplay-start-session" -> {
+                            diagnostics?.begin(DiagnosticStage.NEIGHBOR)
+                            diagnostics?.begin(DiagnosticStage.AIRPLAY)
+                            mainHandler.postDelayed({
+                                if (!closed && diagnostics?.snapshot()?.steps?.firstOrNull { it.stage == DiagnosticStage.AIRPLAY }?.state == com.shilapi.xcertplay.diagnostics.DiagnosticState.RUNNING) {
+                                    diagnostics.fail(DiagnosticStage.AIRPLAY, "AirPlay session did not activate within 45 seconds after CarPlay start")
+                                    uiListener?.onTransportError("AirPlay setup timed out; reconnect manually")
+                                    close()
+                                }
+                            }, 45_000)
+                        }
+                    }
+                    debugLog("wired $message")
+                },
             )
             onStatus(
                 when (result.terminal) {
@@ -1736,7 +1792,7 @@ class CarPlayController(
         }
     }
 
-    private fun closeWirelessStack(service: CarPlayVpnService? = vpnService) {
+    private fun closeWirelessStack(service: CarPlayHost? = vpnService) {
         wirelessConnectionProof.clear()
         media.setIapTunnelHandler(null)
         val activeTunnel = wirelessTunnelChannel
@@ -1852,6 +1908,7 @@ class CarPlayController(
     }
 
     private fun attachVpn(ncm: NcmUsbBridge, hostMac: ByteArray): Boolean {
+        diagnostics?.begin(DiagnosticStage.NETWORK)
         onStatus(CarPlayStatus.AttachingNetwork)
         val service = awaitVpnService() ?: run {
             debugLog("wired VPN service bind failed")
@@ -1873,20 +1930,23 @@ class CarPlayController(
             )
         } catch (error: Throwable) {
             ncm.close()
-            onStatus(CarPlayStatus.Failed(error.message ?: error.javaClass.simpleName))
+            diagnostics?.fail(reason = DiagnosticFailure.describe(error))
+        onStatus(CarPlayStatus.Failed(error.message ?: error.javaClass.simpleName))
             return false
         }
         return when (result) {
-            CarPlayVpnService.AttachResult.Started -> {
-                debugLog("wired VPN/NCM transport attach result=started")
+            CarPlayHost.AttachResult.Started -> {
+                diagnostics?.pass(DiagnosticStage.NETWORK, "${config.wiredNetworkMode} backend and AirPlay listener initialized")
+                diagnostics?.begin(DiagnosticStage.NETWORK_INPUT)
+                debugLog("wired ${config.wiredNetworkMode}/NCM transport attach result=started")
                 true
             }
-            CarPlayVpnService.AttachResult.AlreadyStarted -> {
+            CarPlayHost.AttachResult.AlreadyStarted -> {
                 debugLog("wired VPN/NCM transport attach result=already-started")
                 ncm.close()
                 false
             }
-            is CarPlayVpnService.AttachResult.Failed -> {
+            is CarPlayHost.AttachResult.Failed -> {
                 debugLog("wired VPN/NCM transport attach result=failed ${result.message}")
                 ncm.close()
                 onStatus(CarPlayStatus.Failed(result.message))
@@ -1898,7 +1958,7 @@ class CarPlayController(
     private fun ByteArray.macString(): String =
         joinToString(":") { byte -> "%02x".format(byte.toInt() and 0xff) }
 
-    private fun awaitVpnService(): CarPlayVpnService? {
+    private fun awaitVpnService(): CarPlayHost? {
         vpnService?.let { return it }
         bindVpn()
         return try {
@@ -1913,7 +1973,8 @@ class CarPlayController(
         if (vpnBound) return
         vpnBound = true
         try {
-            val intent = Intent(appContext, CarPlayVpnService::class.java)
+            val serviceClass = if (config.transport == CarPlayTransport.WIRED && config.wiredNetworkMode == WiredNetworkMode.USERSPACE) CarPlayUserSpaceService::class.java else CarPlayVpnService::class.java
+            val intent = Intent(appContext, serviceClass)
             if (!appContext.bindService(intent, serviceConnection, Context.BIND_AUTO_CREATE)) {
                 vpnBound = false
                 vpnLatch.countDown()
@@ -1990,6 +2051,31 @@ class CarPlayController(
 
     private fun onStatus(status: CarPlayStatus) {
         if (closed) return
+        when (status) {
+            CarPlayStatus.MfiReady -> diagnostics?.pass(DiagnosticStage.AUTH_PROVIDER, "Authentication provider loaded")
+            CarPlayStatus.DiscoveringIphone, CarPlayStatus.WaitingForIphone -> diagnostics?.begin(DiagnosticStage.USB_DEVICE)
+            CarPlayStatus.RequestingIphonePermission -> {
+                diagnostics?.pass(DiagnosticStage.USB_DEVICE, "Apple USB device enumerated")
+                diagnostics?.begin(DiagnosticStage.USB_PERMISSION)
+            }
+            CarPlayStatus.WaitingForReenumeration -> {
+                diagnostics?.pass(DiagnosticStage.USB_DEVICE, "Apple USB device enumerated")
+                diagnostics?.pass(DiagnosticStage.USB_PERMISSION, "USB access granted")
+                diagnostics?.pass(DiagnosticStage.CAPABILITIES, "USB Host access verified")
+                diagnostics?.begin(DiagnosticStage.USB_CONFIGURATION)
+            }
+            CarPlayStatus.OpeningDataPaths -> diagnostics?.begin(DiagnosticStage.USBMUX)
+            CarPlayStatus.Pairing -> {
+                diagnostics?.pass(DiagnosticStage.USB_CONFIGURATION, "CarPlay USB configuration selected")
+                diagnostics?.begin(DiagnosticStage.PAIRING)
+            }
+            CarPlayStatus.ConnectingControl -> {
+                diagnostics?.pass(DiagnosticStage.PAIRING, "Lockdown pairing record available")
+                diagnostics?.begin(DiagnosticStage.CONTROL)
+            }
+            is CarPlayStatus.Failed -> diagnostics?.fail(reason = DiagnosticFailure.safeReason(status.message))
+            else -> Unit
+        }
         mainHandler.post {
             if (!closed && status != lastReportedStatus) {
                 lastReportedStatus = status

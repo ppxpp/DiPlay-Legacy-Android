@@ -72,6 +72,9 @@ import com.shilapi.xcertplay.location.AndroidCarPlayLocationProvider
 import com.shilapi.xcertplay.media.AndroidMediaSink
 import com.shilapi.xcertplay.media.CarPlayTouchMapper
 import com.shilapi.xcertplay.network.CarPlayVpnService
+import com.shilapi.xcertplay.orchestration.WiredNetworkMode
+import com.shilapi.xcertplay.diagnostics.ConnectionDiagnostics
+import com.shilapi.xcertplay.diagnostics.DiagnosticStage
 import com.shilapi.xcertplay.orchestration.CarPlayController
 import com.shilapi.xcertplay.orchestration.CarPlayRuntimeConfig
 import com.shilapi.xcertplay.orchestration.CarPlayStatus
@@ -119,6 +122,7 @@ class CarPlayHostActivity : ComponentActivity() {
 
     // CH341 USB\VID_1A86&PID_5512&REV_0304 is the deployment-supplied bridge identity.
     private fun createRuntimeConfig(): CarPlayRuntimeConfig = CarPlayRuntimeConfig(
+        wiredNetworkMode = AirPlayPersistence.loadWiredNetworkMode(this),
         mfiTarget = MfiTarget.LOCAL,
         ch341Devices = if (mfiTarget == MfiTarget.USB_CH341) {
             listOf(UsbDeviceId(0x1a86, 0x5512))
@@ -165,8 +169,10 @@ class CarPlayHostActivity : ComponentActivity() {
             awaitingVpnConsent = false
             if (result.resultCode == RESULT_OK) {
                 vpnReady = true
+                ConnectionDiagnostics.current?.pass(DiagnosticStage.VPN, "VPN consent granted")
                 maybeStartCarPlay()
             } else {
+                ConnectionDiagnostics.current?.fail(DiagnosticStage.VPN, "User denied VPN consent")
                 setStatus(getString(R.string.vpn_consent_was_denied))
             }
         }
@@ -493,7 +499,13 @@ class CarPlayHostActivity : ComponentActivity() {
         if (wirelessEnabled) {
             requestWirelessPermissions()
         } else {
-            requestVpnConsent()
+            val run = ConnectionDiagnostics.start(AirPlayPersistence.loadWiredNetworkMode(this))
+            if (packageManager.hasSystemFeature(PackageManager.FEATURE_USB_HOST)) run.pass(DiagnosticStage.CAPABILITIES, "USB Host declared by Android")
+            else run.unverified(DiagnosticStage.CAPABILITIES, "USB Host not declared; actual device access still needs verification")
+            if (AirPlayPersistence.loadWiredNetworkMode(this) == WiredNetworkMode.USERSPACE) {
+                vpnReady = true
+                maybeStartCarPlay()
+            } else requestVpnConsent()
         }
     }
 
@@ -513,9 +525,16 @@ class CarPlayHostActivity : ComponentActivity() {
             PackageManager.PERMISSION_GRANTED
 
     private fun requestVpnConsent() {
-        val consent = CarPlayVpnService.prepare(this)
+        ConnectionDiagnostics.current?.begin(DiagnosticStage.VPN)
+        val consent = try { CarPlayVpnService.prepare(this) } catch (error: Exception) {
+            ConnectionDiagnostics.current?.fail(DiagnosticStage.VPN, "VPN service unavailable: ${error.javaClass.simpleName}")
+            setConnectionStage(getString(R.string.wired_vpn_unavailable))
+            if (intent.getBooleanExtra("show_diagnostics", false)) showDiPlayHome("diagnostics")
+            return
+        }
         if (consent == null) {
             vpnReady = true
+            ConnectionDiagnostics.current?.pass(DiagnosticStage.VPN, "VPN consent granted")
             maybeStartCarPlay()
         } else {
             awaitingVpnConsent = true
@@ -2808,7 +2827,7 @@ class CarPlayHostActivity : ComponentActivity() {
         return AirPlayConfig(
             deviceName = "DiPlay",
             deviceId = DiPlayBootstrap.deviceId(airPlayIdentity),
-            btMac = DiPlayBluetooth.localAddress(this) ?: DiPlayBootstrap.deviceId(airPlayIdentity),
+            btMac = if (wirelessEnabled) DiPlayBluetooth.localAddress(this) ?: DiPlayBootstrap.deviceId(airPlayIdentity) else DiPlayBootstrap.deviceId(airPlayIdentity),
             sourceVersion = "950.7.1",
             main = display,
             cluster = clusterDisplayConfig(),
@@ -3203,6 +3222,7 @@ class CarPlayHostActivity : ComponentActivity() {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) startForegroundService(service)
             else startService(service)
             next.start()
+            if (intent.getBooleanExtra("show_diagnostics", false)) showDiPlayHome("diagnostics")
         } catch (error: RuntimeException) {
             appendLog("Connection could not start: ${error.javaClass.simpleName}")
             shutdown(false, "foreground service could not start")
@@ -3423,6 +3443,7 @@ class CarPlayHostActivity : ComponentActivity() {
             airPlayCommandExecutor.shutdown()
             if (terminateProcess) {
                 applicationContext.stopService(Intent(applicationContext, CarPlayVpnService::class.java))
+                applicationContext.stopService(Intent(applicationContext, com.shilapi.xcertplay.network.CarPlayUserSpaceService::class.java))
             }
             Log.i(TAG, "shutdown complete clean=$clean")
             applicationContext.stopService(Intent(applicationContext, DiPlaySessionService::class.java))

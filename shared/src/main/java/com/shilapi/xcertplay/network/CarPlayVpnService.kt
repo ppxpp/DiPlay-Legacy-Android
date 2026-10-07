@@ -1,5 +1,6 @@
 package com.shilapi.xcertplay.network
 
+import com.shilapi.xcertplay.network.CarPlayHost.AttachResult
 import android.content.Context
 import android.content.Intent
 import android.net.VpnService
@@ -30,17 +31,7 @@ import java.util.concurrent.atomic.AtomicBoolean
  * The wired path also owns the Android VPN tunnel and NCM IPv6 bridge. VPN consent is requested
  * with [prepare] before binding.
  */
-class CarPlayVpnService : VpnService() {
-    inner class LocalBinder : Binder() {
-        val service: CarPlayVpnService get() = this@CarPlayVpnService
-    }
-
-    sealed class AttachResult {
-        data object Started : AttachResult()
-        data object AlreadyStarted : AttachResult()
-        data class Failed(val message: String) : AttachResult()
-    }
-
+class CarPlayVpnService : VpnService(), CarPlayHost {
     private data class AirPlayAttachment(
         val address: InetAddress,
         val config: AirPlayConfig,
@@ -51,7 +42,7 @@ class CarPlayVpnService : VpnService() {
         val media: AirPlayMediaHandler,
     )
 
-    private val binder = LocalBinder()
+    private val binder = CarPlayHostBinder(this)
     private val active = AtomicBoolean(false)
     private val sessionsLock = Any()
     private val sessions = mutableSetOf<AirPlaySession>()
@@ -64,7 +55,7 @@ class CarPlayVpnService : VpnService() {
     override fun onBind(intent: Intent?): IBinder = binder
 
     @Synchronized
-    fun attach(
+    override fun attach(
         ncm: NcmUsbBridge,
         linkLocal: String,
         hostMac: ByteArray,
@@ -98,9 +89,10 @@ class CarPlayVpnService : VpnService() {
                 ?: throw IOException("VpnService.establish returned null")
             tun = tunFd
 
-            val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac) { error ->
-                onTransportError(generation, listener, error)
-            }
+            val run = com.shilapi.xcertplay.diagnostics.ConnectionDiagnostics.current
+            val ipv6Bridge = Ipv6NcmBridge(ncm, tunFd, hostMac,
+                onError = { error -> onTransportError(generation, listener, error) },
+                onFrame = { run?.pass(com.shilapi.xcertplay.diagnostics.DiagnosticStage.NETWORK_INPUT, "Received IPv6 frame over USB NCM") })
             ipv6Bridge.start()
             bridge = ipv6Bridge
 
@@ -120,7 +112,7 @@ class CarPlayVpnService : VpnService() {
      * NCM bridge.
      */
     @Synchronized
-    fun attachWireless(
+    override fun attachWireless(
         bindAddress: InetAddress,
         config: AirPlayConfig,
         identity: AirPlayIdentity,
@@ -149,11 +141,11 @@ class CarPlayVpnService : VpnService() {
 
     /** Releases the active AirPlay listener and whichever VPN/NCM transport resources are active. */
     @Synchronized
-    fun detach() {
+    override fun detach() {
         releaseLocked()
     }
 
-    fun isAttached(): Boolean = active.get() && attachment != null
+    override fun isAttached(): Boolean = active.get() && attachment != null
 
     override fun onDestroy() {
         detach()
@@ -189,7 +181,7 @@ class CarPlayVpnService : VpnService() {
                 socket.keepAlive = true
                 socket.setSoLinger(true, 0)
                 val session = synchronized(this) {
-                    if (!active.get()) {
+                    if (!active.get() || generation != attachGeneration) {
                         socket.close()
                         return
                     }

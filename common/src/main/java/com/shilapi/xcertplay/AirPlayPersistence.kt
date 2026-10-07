@@ -20,6 +20,13 @@ import java.io.File
 
 /** SharedPreferences persistence for the accessory identity and paired controllers. */
 object AirPlayPersistence {
+    fun loadWiredNetworkMode(context: Context): com.shilapi.xcertplay.orchestration.WiredNetworkMode =
+        runCatching { com.shilapi.xcertplay.orchestration.WiredNetworkMode.valueOf(context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getString("wired_network_mode", "VPN") ?: "VPN") }
+            .getOrDefault(com.shilapi.xcertplay.orchestration.WiredNetworkMode.VPN)
+    fun saveWiredNetworkMode(context: Context, mode: com.shilapi.xcertplay.orchestration.WiredNetworkMode) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).edit().putString("wired_network_mode", mode.name).apply()
+    }
+
     private const val PREFS = "xcertplay_airplay"
     private const val KEY_IDENT_PRIVATE = "identity_private"
     private const val KEY_IDENT_PUBLIC = "identity_public"

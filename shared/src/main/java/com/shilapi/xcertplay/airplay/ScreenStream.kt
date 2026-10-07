@@ -1,5 +1,8 @@
 package com.shilapi.xcertplay.airplay
 
+import com.shilapi.xcertplay.network.AirPlayNetwork
+import com.shilapi.xcertplay.network.SystemAirPlayNetwork
+
 import android.util.Log
 import java.io.Closeable
 import java.io.InputStream
@@ -19,7 +22,7 @@ enum class VideoCodec { H264, H265 }
  * (avcC/hvcC) or a ChaCha20-Poly1305 sealed VideoFrame. The key is the DataStream output key
  * and the per-frame nonce is an 8-byte little-endian counter.
  */
-class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String) -> Unit = {}) : Closeable {
+class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String) -> Unit = {}, private val network: AirPlayNetwork = SystemAirPlayNetwork) : Closeable {
     interface Listener {
         fun onCodec(codec: VideoCodec) {}
         fun onConfig(codecData: ByteArray) {}
@@ -37,7 +40,7 @@ class ScreenStream(private val key: ByteArray, private val onDiagnostic: (String
 
     fun listen(listener: Listener): Int {
         this.listener = listener
-        val bound = ServerSocket()
+        val bound = network.server()
         bound.reuseAddress = true
         bound.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
         server = bound

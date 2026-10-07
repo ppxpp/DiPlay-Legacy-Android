@@ -3,6 +3,7 @@ plugins {
 }
 
 android {
+    testOptions { unitTests.isIncludeAndroidResources = true }
     namespace = "com.shilapi.xcertplay.host"
     compileSdk {
         version = release(37)

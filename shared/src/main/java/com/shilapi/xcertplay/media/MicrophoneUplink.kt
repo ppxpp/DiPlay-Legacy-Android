@@ -105,7 +105,7 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
         }
 
         val nextSocket = try {
-            DatagramSocket(null).apply {
+            config.network.datagram().apply {
                 reuseAddress = true
                 bind(InetSocketAddress(InetAddress.getByName("::"), 0))
             }
@@ -210,6 +210,7 @@ internal class MicrophoneUplink(private val config: MicrophoneConfig) : Closeabl
         )
         try {
             socket.send(DatagramPacket(packet, packet.size, config.host, config.port))
+        config.onPacketSent()
             if (firstPacketLogged.compareAndSet(false, true)) {
                 Log.i(
                     TAG,

@@ -14,6 +14,8 @@ data class MicrophoneConfig(
     val key: ByteArray,
     val codec: AudioCodecKind = AudioCodecKind.LPCM,
     val bitrate: Int? = null,
+    val network: com.shilapi.xcertplay.network.AirPlayNetwork = com.shilapi.xcertplay.network.SystemAirPlayNetwork,
+    val onPacketSent: () -> Unit = {},
 ) {
     val samplesPerPacket: Int
         get() = if (codec == AudioCodecKind.OPUS) {

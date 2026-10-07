@@ -1,5 +1,8 @@
 package com.shilapi.xcertplay.airplay
 
+import com.shilapi.xcertplay.network.AirPlayNetwork
+import com.shilapi.xcertplay.network.SystemAirPlayNetwork
+
 import java.io.Closeable
 import java.io.IOException
 import java.net.DatagramPacket
@@ -30,6 +33,7 @@ class AudioStream(
     private val key: ByteArray,
     private val streamType: Int = -1,
     private val onDiagnostic: (String) -> Unit = {},
+    private val network: AirPlayNetwork = SystemAirPlayNetwork,
 ) : Closeable {
     interface Listener {
         fun onStarted(firstSample: Int) {}
@@ -171,7 +175,7 @@ class AudioStream(
     }
 
     private fun bindAnyPort(): DatagramSocket {
-        val socket = DatagramSocket(null)
+        val socket = network.datagram()
         socket.reuseAddress = true
         socket.bind(InetSocketAddress(InetAddress.getByName("::"), 0))
         return socket

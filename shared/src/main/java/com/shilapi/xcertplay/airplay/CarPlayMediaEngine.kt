@@ -70,7 +70,7 @@ class CarPlayMediaEngine(
         val key = outputKey(session, stream) ?: return null
         val streamKey = StreamKey(session, type)
         Log.i(TAG, "airplay screen key connectionID=${unsignedPlistDecimal(stream["streamConnectionID"])}")
-        val screen = ScreenStream(key, session::logDebug)
+        val screen = ScreenStream(key, session::logDebug, session.network)
         sink.setVideoDiagnosticHandler(type) {
             if (it == "first frame rendered") session.videoFrameRendered()
             session.logDebug("Video: $it")
@@ -138,7 +138,7 @@ class CarPlayMediaEngine(
 
         val capture = audioCaptureDirectory?.let { AudioPacketCapture(it, type) }
         if (capture != null) audioCaptures[type] = capture
-        val audio = AudioStream(key, type, session::logDebug)
+        val audio = AudioStream(key, type, session::logDebug, session.network)
         val (dataPort, controlPort) = audio.listen(
             object : AudioStream.Listener {
                 override fun onStarted(firstSample: Int) {
@@ -148,8 +148,10 @@ class CarPlayMediaEngine(
                     microphone?.let { sink.onMicrophoneStarted(type, it) }
                 }
 
-                override fun onRtp(rtp: ByteArray, sample: Int) =
+                override fun onRtp(rtp: ByteArray, sample: Int) {
                     sink.onAudioRtp(type, format, rtp, sample)
+                    session.audioPacketReceived()
+                }
 
                 override fun onPacket(
                     wire: ByteArray,
@@ -187,6 +189,7 @@ class CarPlayMediaEngine(
             32,
         )
         val tunnel = IapTunnel(
+            network = session.network,
             readKey = key,
             bindAddress = session.localAddress
                 ?: when (session.remoteAddress) {
@@ -347,6 +350,8 @@ class CarPlayMediaEngine(
             else -> 48_000
         }
         return MicrophoneConfig(
+            network = session.network,
+            onPacketSent = { session.microphonePacketSent() },
             audioType = format.audioType,
             sampleRate = format.sampleRate,
             channels = format.channels,
